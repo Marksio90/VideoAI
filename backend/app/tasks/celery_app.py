@@ -61,5 +61,13 @@ celery_app.conf.update(
     task_time_limit=900,  # 15 min hard limit
 )
 
-# Auto-discover tasks
-celery_app.autodiscover_tasks(["app.tasks"])
+# Explicitly include task modules (autodiscover_tasks looks for a "tasks"
+# submodule inside each listed package, which doesn't match our layout).
+celery_app.conf.update(
+    include=[
+        "app.tasks.video_pipeline",
+        "app.tasks.publishing",
+        "app.tasks.scheduler",
+        "app.tasks.analytics",
+    ],
+)
