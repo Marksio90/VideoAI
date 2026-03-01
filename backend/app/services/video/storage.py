@@ -32,7 +32,7 @@ class StorageService:
         self.s3 = boto3.client("s3", **kwargs)
 
     def upload_file(self, local_path: str, key: str, content_type: str | None = None) -> str:
-        """Uploaduje plik do S3 i zwraca URL."""
+        """Uploaduje plik do S3 i zwraca publiczny URL dostępny dla przeglądarki."""
         ct = content_type or self._guess_content_type(local_path)
 
         logger.info("Upload do S3", key=key, content_type=ct)
@@ -44,19 +44,35 @@ class StorageService:
             ExtraArgs={"ContentType": ct},
         )
 
-        if settings.S3_ENDPOINT_URL:
-            return f"{settings.S3_ENDPOINT_URL}/{self.bucket}/{key}"
-        return f"https://{self.bucket}.s3.{settings.S3_REGION}.amazonaws.com/{key}"
+        return self._public_url(key)
 
     def upload_bytes(self, data: bytes, key: str, content_type: str = "application/octet-stream") -> str:
-        """Uploaduje bajty do S3."""
+        """Uploaduje bajty do S3 i zwraca publiczny URL."""
         import io
 
         self.s3.upload_fileobj(io.BytesIO(data), self.bucket, key, ExtraArgs={"ContentType": content_type})
 
-        if settings.S3_ENDPOINT_URL:
-            return f"{settings.S3_ENDPOINT_URL}/{self.bucket}/{key}"
-        return f"https://{self.bucket}.s3.{settings.S3_REGION}.amazonaws.com/{key}"
+        return self._public_url(key)
+
+    def _public_url(self, key: str) -> str:
+        """Zwraca URL dostępny dla przeglądarki/klienta zewnętrznego.
+
+        Priorytety:
+        1. S3_PUBLIC_BASE_URL (jawnie ustawiony publiczny base, np. http://localhost:9000)
+        2. AWS S3 presigned — gdy brak endpoint (produkcyjne S3)
+        3. Fallback: S3_ENDPOINT_URL (uwaga: w dev może być niedostępny z przeglądarki)
+        """
+        if settings.S3_PUBLIC_BASE_URL:
+            base = settings.S3_PUBLIC_BASE_URL.rstrip("/")
+            return f"{base}/{self.bucket}/{key}"
+        if not settings.S3_ENDPOINT_URL:
+            return f"https://{self.bucket}.s3.{settings.S3_REGION}.amazonaws.com/{key}"
+        # Ostateczny fallback — adres wewnętrzny (MinIO); może nie działać z przeglądarki
+        logger.warning(
+            "S3_PUBLIC_BASE_URL nie ustawione; URL może być niedostępny z przeglądarki",
+            key=key,
+        )
+        return f"{settings.S3_ENDPOINT_URL}/{self.bucket}/{key}"
 
     def get_presigned_url(self, key: str, expires_in: int = 3600) -> str:
         """Generuje presigned URL do odczytu."""

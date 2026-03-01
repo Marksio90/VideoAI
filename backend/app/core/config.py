@@ -65,6 +65,7 @@ class Settings(BaseSettings):
 
     # ── Storage (S3 / MinIO) ──
     S3_ENDPOINT_URL: str = ""
+    S3_PUBLIC_BASE_URL: str = ""  # publiczny URL dla przeglądarki, np. http://localhost:9000
     S3_ACCESS_KEY: str = ""
     S3_SECRET_KEY: str = ""
     S3_BUCKET_NAME: str = "autoshorts-media"
@@ -110,7 +111,18 @@ class Settings(BaseSettings):
     @classmethod
     def parse_origins(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
+            stripped = v.strip()
+            # Obsłuż format JSON: '["https://a.com", "https://b.com"]'
+            if stripped.startswith("["):
+                import json
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return [str(o).strip() for o in parsed if str(o).strip()]
+                except json.JSONDecodeError:
+                    pass
+            # Fallback: CSV: "https://a.com,https://b.com"
+            return [origin.strip() for origin in stripped.split(",") if origin.strip()]
         return v
 
 

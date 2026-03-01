@@ -5,7 +5,9 @@ Ulepszenie: walidacja state machine + rate limiting generacji.
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +25,7 @@ from app.schemas.video import (
 )
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.get("", response_model=VideoListResponse)
@@ -61,7 +64,9 @@ async def list_videos(
 
 
 @router.post("/generate", response_model=VideoResponse, status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("5/minute")
 async def generate_video(
+    request: Request,
     body: VideoGenerateRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

@@ -49,9 +49,12 @@ def generate_video_task(
     try:
         _run_async(_execute_pipeline(video_id, series_id, custom_topic, custom_prompt))
     except Exception as exc:
-        logger.error("Pipeline błąd", video_id=video_id, error=str(exc))
+        logger.error("Pipeline błąd", video_id=video_id, error=str(exc), retries=self.request.retries)
         _run_async(_set_video_status(video_id, "failed", str(exc)))
-        raise self.retry(exc=exc) if self.request.retries < self.max_retries else None
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc)
+        # Retries wyczerpane — zakończ z jawnym wyjątkiem zamiast raise None
+        raise exc
 
 
 async def _execute_pipeline(

@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  # ── Backend: lint, type-check, tests ──
+  backend:
+    name: Backend (Python)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: autoshorts
+          POSTGRES_PASSWORD: autoshorts
+          POSTGRES_DB: autoshorts_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U autoshorts"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Format check (ruff)
+        run: ruff format --check .
+
+      - name: Type check (mypy)
+        run: mypy app --ignore-missing-imports --no-strict-optional
+        continue-on-error: true  # mypy jest informacyjny — nie blokuje PR na start
+
+      - name: Tests (pytest)
+        env:
+          DATABASE_URL: postgresql+asyncpg://autoshorts:autoshorts@localhost:5432/autoshorts_test
+          REDIS_URL: redis://localhost:6379/0
+          CELERY_BROKER_URL: redis://localhost:6379/1
+          CELERY_RESULT_BACKEND: redis://localhost:6379/2
+          SECRET_KEY: test-secret-key-for-ci-only
+          ENVIRONMENT: development
+          S3_ENDPOINT_URL: ""
+          S3_PUBLIC_BASE_URL: ""
+          S3_BUCKET_NAME: test-bucket
+          OPENAI_API_KEY: ""
+          ELEVENLABS_API_KEY: ""
+          PEXELS_API_KEY: ""
+        run: |
+          pytest --cov=app --cov-report=term-missing -q
+
+  # ── Frontend: lint, type-check, build ──
+  frontend:
+    name: Frontend (Next.js)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (ESLint)
+        run: npm run lint
+        continue-on-error: true  # nie blokuje na start
+
+      - name: Type check (tsc)
+        run: npx tsc --noEmit
+        continue-on-error: true
+
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
