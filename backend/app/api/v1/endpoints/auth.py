@@ -86,7 +86,9 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(body: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
-    """Odświeżanie tokena — rotacja refresh tokenów."""
+    """Odświeżanie tokena — rotacja refresh tokenów z JTI blacklistingiem."""
+    from app.core.token_revocation import is_jti_revoked, revoke_jti
+
     try:
         payload = decode_token(body.refresh_token)
     except Exception:
@@ -101,6 +103,16 @@ async def refresh_token(body: RefreshTokenRequest, db: AsyncSession = Depends(ge
             detail="To nie jest refresh token",
         )
 
+    jti = payload.get("jti")
+    exp = payload.get("exp", 0)
+
+    # Wykryj ponowne użycie (reuse detection) — token już unieważniony
+    if jti and await is_jti_revoked(jti):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token został już użyty lub unieważniony",
+        )
+
     user_id = payload.get("sub")
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -110,6 +122,10 @@ async def refresh_token(body: RefreshTokenRequest, db: AsyncSession = Depends(ge
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Użytkownik nie istnieje",
         )
+
+    # Unieważnij stary JTI (single-use)
+    if jti:
+        await revoke_jti(jti, exp)
 
     # Rotacja — nowy refresh token zastępuje stary
     new_access = create_access_token(str(user.id))

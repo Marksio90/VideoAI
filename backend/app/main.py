@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from app.api.v1.router import api_router
@@ -54,9 +55,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Rate limiting
+# Rate limiting — limiter musi być w state przed middleware
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# SlowAPIMiddleware egzekwuje default_limits globalnie (bez niego limiter działa tylko per-dekorator)
+app.add_middleware(SlowAPIMiddleware)
 
 # CORS
 app.add_middleware(
@@ -80,14 +83,34 @@ async def health_check():
 
 @app.get("/health/ready")
 async def readiness_check():
-    """Sprawdzenie gotowości (baza danych + Redis)."""
+    """Sprawdzenie gotowości (baza danych + Redis). Zwraca 503 przy awarii zależności."""
+    import redis.asyncio as aioredis
+    from sqlalchemy import text
+
     from app.core.database import engine
 
+    errors: list[str] = []
+
+    # Sprawdź bazę danych
     try:
         async with engine.connect() as conn:
-            await conn.execute(type(conn).sync_engine.dialect.do_ping)
-    except Exception:
-        pass  # W development mode OK, w production powinno zwrócić 503
+            await conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        errors.append(f"database: {exc}")
+
+    # Sprawdź Redis
+    try:
+        r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=2)
+        await r.ping()
+        await r.aclose()
+    except Exception as exc:
+        errors.append(f"redis: {exc}")
+
+    if errors:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "not ready", "errors": errors},
+        )
 
     return {"status": "ready"}
 
