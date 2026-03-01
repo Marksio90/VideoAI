@@ -40,9 +40,12 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
-# Media / uploads
+# Media / uploads (runtime files, not source code)
 uploads/
 media/
+# Exception: services/media is Python source, not a media upload directory
+!**/services/media/
+!**/services/media/**
 *.mp4
 *.wav
 *.mp3

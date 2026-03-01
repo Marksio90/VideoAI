@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     STRIPE_PRICE_PRO: str = ""
     STRIPE_PRICE_AGENCY: str = ""
 
+    # ── Stock Media (Pexels) ──
+    PEXELS_API_KEY: str = ""
+
     # ── Sentry ──
     SENTRY_DSN: str = ""
 
