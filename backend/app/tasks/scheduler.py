@@ -34,80 +34,92 @@ def check_scheduled_videos():
 
 async def _check_schedules():
     from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-    from app.core.database import async_session_factory
+    from app.core.config import get_settings
     from app.models.series import Series
     from app.models.video import Video, VideoStatus
+
+    settings = get_settings()
+    # Create a fresh engine bound to the current event loop (Celery forks give
+    # each worker a new loop; the module-level engine uses the parent's loop).
+    local_engine = create_async_engine(str(settings.DATABASE_URL), pool_pre_ping=True)
+    local_session_factory = async_sessionmaker(
+        local_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
     now = datetime.now(timezone.utc)
     current_day = now.strftime("%A").lower()
     current_hour = now.strftime("%H:%M")
 
-    async with async_session_factory() as db:
-        # Pobierz aktywne serie
-        result = await db.execute(
-            select(Series).where(
-                Series.is_active.is_(True),
-                Series.deleted_at.is_(None),
-            )
-        )
-        all_series = list(result.scalars().all())
-
-        for series in all_series:
-            schedule = series.schedule_config or {}
-            days = schedule.get("days", [])
-            time_utc = schedule.get("time_utc", "14:00")
-
-            # Czy dzisiaj jest dzień generacji?
-            if current_day not in days:
-                continue
-
-            # Czy to odpowiednia godzina? (tolerancja ±1 min)
-            if current_hour != time_utc:
-                continue
-
-            # Czy już wygenerowano dzisiaj?
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            existing = await db.execute(
-                select(Video).where(
-                    Video.series_id == series.id,
-                    Video.created_at >= today_start,
+    try:
+        async with local_session_factory() as db:
+            # Pobierz aktywne serie
+            result = await db.execute(
+                select(Series).where(
+                    Series.is_active.is_(True),
+                    Series.deleted_at.is_(None),
                 )
             )
-            if existing.scalar_one_or_none():
-                continue
+            all_series = list(result.scalars().all())
 
-            # Generuj nowy odcinek!
-            logger.info(
-                "Scheduler: generowanie odcinka",
-                series_id=str(series.id),
-                series_title=series.title,
-            )
+            for series in all_series:
+                schedule = series.schedule_config or {}
+                days = schedule.get("days", [])
+                time_utc = schedule.get("time_utc", "14:00")
 
-            from app.tasks.video_pipeline import generate_video_task
-            from app.models.user import User
+                # Czy dzisiaj jest dzień generacji?
+                if current_day not in days:
+                    continue
 
-            # Sprawdź limit użytkownika
-            user_result = await db.execute(select(User).where(User.id == series.user_id))
-            user = user_result.scalar_one_or_none()
-            if not user or user.videos_generated_this_month >= user.max_videos_per_month:
-                logger.warning("Scheduler: limit miesięczny", user_id=str(series.user_id))
-                continue
+                # Czy to odpowiednia godzina? (tolerancja ±1 min)
+                if current_hour != time_utc:
+                    continue
 
-            # Utwórz rekord wideo
-            video = Video(
-                series_id=series.id,
-                episode_number=series.total_episodes + 1,
-                status=VideoStatus.PENDING,
-            )
-            db.add(video)
-            series.total_episodes += 1
-            user.videos_generated_this_month += 1
-            db.add(series)
-            db.add(user)
-            await db.commit()
+                # Czy już wygenerowano dzisiaj?
+                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                existing = await db.execute(
+                    select(Video).where(
+                        Video.series_id == series.id,
+                        Video.created_at >= today_start,
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    continue
 
-            generate_video_task.delay(str(video.id), str(series.id), None, None)
+                # Generuj nowy odcinek!
+                logger.info(
+                    "Scheduler: generowanie odcinka",
+                    series_id=str(series.id),
+                    series_title=series.title,
+                )
+
+                from app.tasks.video_pipeline import generate_video_task
+                from app.models.user import User
+
+                # Sprawdź limit użytkownika
+                user_result = await db.execute(select(User).where(User.id == series.user_id))
+                user = user_result.scalar_one_or_none()
+                if not user or user.videos_generated_this_month >= user.max_videos_per_month:
+                    logger.warning("Scheduler: limit miesięczny", user_id=str(series.user_id))
+                    continue
+
+                # Utwórz rekord wideo
+                video = Video(
+                    series_id=series.id,
+                    episode_number=series.total_episodes + 1,
+                    status=VideoStatus.PENDING,
+                )
+                db.add(video)
+                series.total_episodes += 1
+                user.videos_generated_this_month += 1
+                db.add(series)
+                db.add(user)
+                await db.commit()
+
+                generate_video_task.delay(str(video.id), str(series.id), None, None)
+    finally:
+        await local_engine.dispose()
 
 
 @celery_app.task(name="app.tasks.scheduler.refresh_expiring_tokens")
@@ -121,33 +133,43 @@ async def _refresh_tokens():
     from datetime import timedelta
 
     from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-    from app.core.database import async_session_factory
+    from app.core.config import get_settings
     from app.models.platform_connection import PlatformConnection
+
+    settings = get_settings()
+    local_engine = create_async_engine(str(settings.DATABASE_URL), pool_pre_ping=True)
+    local_session_factory = async_sessionmaker(
+        local_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
     now = datetime.now(timezone.utc)
     threshold = now + timedelta(hours=2)
 
-    async with async_session_factory() as db:
-        result = await db.execute(
-            select(PlatformConnection).where(
-                PlatformConnection.is_active.is_(True),
-                PlatformConnection.token_expires_at.isnot(None),
-                PlatformConnection.token_expires_at <= threshold,
-                PlatformConnection.refresh_token.isnot(None),
-            )
-        )
-        connections = list(result.scalars().all())
-
-        for conn in connections:
-            try:
-                await _refresh_single_token(conn, db)
-            except Exception as e:
-                logger.error(
-                    "Token refresh błąd",
-                    platform=conn.platform,
-                    error=str(e),
+    try:
+        async with local_session_factory() as db:
+            result = await db.execute(
+                select(PlatformConnection).where(
+                    PlatformConnection.is_active.is_(True),
+                    PlatformConnection.token_expires_at.isnot(None),
+                    PlatformConnection.token_expires_at <= threshold,
+                    PlatformConnection.refresh_token.isnot(None),
                 )
+            )
+            connections = list(result.scalars().all())
+
+            for conn in connections:
+                try:
+                    await _refresh_single_token(conn, db)
+                except Exception as e:
+                    logger.error(
+                        "Token refresh błąd",
+                        platform=conn.platform,
+                        error=str(e),
+                    )
+    finally:
+        await local_engine.dispose()
 
 
 async def _refresh_single_token(conn, db):
@@ -194,11 +216,21 @@ def reset_monthly_counters():
 
 async def _reset_counters():
     from sqlalchemy import update
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-    from app.core.database import async_session_factory
+    from app.core.config import get_settings
     from app.models.user import User
 
-    async with async_session_factory() as db:
-        await db.execute(update(User).values(videos_generated_this_month=0))
-        await db.commit()
-        logger.info("Liczniki zresetowane")
+    settings = get_settings()
+    local_engine = create_async_engine(str(settings.DATABASE_URL), pool_pre_ping=True)
+    local_session_factory = async_sessionmaker(
+        local_engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    try:
+        async with local_session_factory() as db:
+            await db.execute(update(User).values(videos_generated_this_month=0))
+            await db.commit()
+            logger.info("Liczniki zresetowane")
+    finally:
+        await local_engine.dispose()
